@@ -1,213 +1,165 @@
-# tlusr-scraping-system
+# tlusr-scraper-web
 
-Modular news acquisition platform for Indonesian portals.  Decomposes the
-old monolithic scraper into three independently-scalable workers
-connected by message queues:
+A **Next.js 15 dashboard** for the Tlusr Scraping System. It visualises the
+`Crawler → Scraper → Parser` pipeline, monitors the filesystem queues in
+real time, and lets you browse the structured articles the parser produces.
+
+This is a **read-only viewer** — it does not run the pipeline. It reads the
+output the Python workers write to disk (queue files, parsed JSON, and the
+per-site YAML configs) and presents it in the browser.
 
 ```
-  ┌──────────────┐        ┌──────────────┐        ┌──────────────┐
-  │  tlusr-crawl │ ─────► │ tlusr-scrape │ ─────► │  tlusr-parse │
-  │  (discover)  │  URL   │   (fetch)    │  raw   │  (extract)   │
-  │              │ manif. │              │  HTML  │              │
-  └──────────────┘  queue └──────────────┘  queue └──────┬───────┘
-         │                       │                       │
-         └───────────────────────┴───────────────────────┘
-                                 ▼
-                       data/tlusr.db (SQLite)
-                       data/parsed/   (JSON)
+   Python workers (separate repo)            This web app
+   ────────────────────────────             ─────────────
+   crawler ─► scraper ─► parser  ──writes──►  data/  ──reads──►  Dashboard
+                                              configs/           Pipeline view
+                                                                 Article browser
+                                                                 Config viewer
 ```
-
-Each worker is a separate Python package with its own CLI, deployable
-independently — they communicate via filesystem queues today and via
-Kafka/PubSub tomorrow without code changes (see *Hexagonal Architecture*
-below).
-
-> **Catatan (id):** Platform akuisisi berita modular.  Tiga worker terpisah
-> (penemuan URL → pengambilan HTML → ekstraksi terstruktur) berkomunikasi
-> via antrian sehingga setiap tahap dapat diskalakan sendiri.
 
 ---
 
 ## Quick start
 
-```bash
-poetry install
-pip install -e ../tlusr-article-parsing-intelligence   # parser worker only
-playwright install chromium                            # if using Playwright
-
-# 1. Discover URLs
-tlusr-crawl run \
-  --config configs/tribunnews_sitemap.yaml \
-  --out-queue data/queues/crawler_to_scraper \
-  --db data/tlusr.db \
-  --max-urls 50
-
-# 2. Fetch HTML (run continuously, or --once to drain)
-tlusr-scrape run \
-  --in-queue  data/queues/crawler_to_scraper \
-  --out-queue data/queues/scraper_to_parser \
-  --configs-dir configs/ \
-  --workers 4
-
-# 3. Parse to structured JSON
-tlusr-parse run \
-  --in-queue   data/queues/scraper_to_parser \
-  --output-dir data/parsed \
-  --once
-```
-
-All three CLIs accept `--log-level` and `--structured-logs` (JSON for
-Google Cloud Logging).
-
----
-
-## Architecture
-
-### Hexagonal (ports & adapters)
-
-Business logic depends only on Protocols defined in
-[`shared/ports/`](shared/ports).  Concrete adapters live in
-[`shared/adapters/`](shared/adapters) and are wired at the composition
-root (the CLI `run` commands).  Swapping SQLite → Postgres or FSQueue →
-Kafka is a one-binding change in the runner — no business-logic edit.
-
-| Port                                           | Adapter (current)                           | Future                          |
-| ---------------------------------------------- | ------------------------------------------- | ------------------------------- |
-| `MessageBroker`                                | `FSBroker` (filesystem, atomic rename)      | `KafkaBroker`, `PubSubBroker`   |
-| `UrlFrontierPort`                              | `SqliteUrlFrontier`                         | `PostgresUrlFrontier`           |
-| `ScrapeJobsPort`                               | `SqliteScrapeJobs`                          | `PostgresScrapeJobs`            |
-| `CrawlSessionPort`                             | `SqliteCrawlSession`                        | `PostgresCrawlSession`          |
-| `RateLimitCoordinator` (`tlusr_crawler`)       | `InMemoryRateLimitCoordinator`              | `RedisRateLimitCoordinator`     |
-
-### Boundary contracts
-
-Two immutable Pydantic models cross worker boundaries — they are the
-*only* coupling between contexts:
-
-- [`shared.models.url_manifest.UrlManifest`](shared/models/url_manifest.py)
-  — Crawler → Scraper.  One URL, plus the metadata the Scraper needs to
-  decide *how* to fetch (render hint, priority, strategy of origin).
-- [`shared.models.raw_document.RawDocument`](shared/models/raw_document.py)
-  — Scraper → Parser.  Fetched HTML plus provenance (manifest_id,
-  http_status, content_type, crawl_timestamp).
-
-Both serialise via `to_queue_dict()` / `from_queue_dict()` so any broker
-can ship them as JSON.
-
-### Resilience
-
-- **Dead-letter queue**: `FSBroker` tracks an attempt counter inside each
-  payload envelope; exhausted items go to `dead/` rather than burning a
-  worker forever on a poison message.  Bad config (missing `site_name`)
-  is dead-lettered immediately — there's no point in retrying.
-- **Stale-claim recovery**: `recover_stale(older_than_seconds=...)`
-  reclaims items abandoned by crashed workers, but not items currently
-  being processed.
-- **At-least-once delivery**: every transition is an atomic `os.replace`;
-  workers ack only after the outbound enqueue succeeds.
-
-### Rate limiting
-
-A real `AsyncTokenBucket`
-([tlusr_scraper/rate_limiter.py](tlusr_scraper/rate_limiter.py))
-enforces `requests_per_minute` per site while allowing concurrent
-in-flight requests — the previous `Semaphore(1) + sleep` implementation
-was a single-flight serializer, not a rate limit.
-
-Phase 5 introduces a `RateLimitCoordinator` for cross-domain budgets
-shared across workers; the in-memory implementation is wired today,
-Redis is the future multi-pod adapter.
-
-### Observability
-
-Structured JSON logging shaped for Google Cloud Logging
-([shared/observability/logging.py](shared/observability/logging.py)).
-Correlation IDs (`session_id`, `manifest_id`, `job_id`, `site`,
-`worker_id`) propagate automatically through every log line via
-`contextvars` ([shared/observability/context.py](shared/observability/context.py))
-— no manual `extra={}` plumbing required.
-
----
-
-## Repository map
-
-```
-tlusr-scraping-system/
-├── configs/                       # YAML site configs (declarative)
-├── docs/                          # Phase-by-phase design notes
-├── shared/
-│   ├── adapters/                  # FSBroker, Sqlite* — concrete I/O
-│   ├── db/                        # migrations + connection helper
-│   ├── models/                    # UrlManifest, RawDocument
-│   ├── observability/             # structured logging + correlation
-│   ├── ports/                     # Protocols (MessageBroker, …)
-│   ├── queue/                     # legacy import path (re-exports)
-│   └── schemas/                   # SiteConfig (Pydantic)
-├── tests/                         # 45 cases, pytest-asyncio
-├── tlusr_crawler/                 # see tlusr_crawler/README.md
-├── tlusr_scraper/                 # see tlusr_scraper/README.md
-└── tlusr_parser_worker/           # adapter onto tlusr_parser package
-```
-
----
-
-## Configuration
-
-All scraping behaviour — selectors, pagination, retries, anti-bot
-delays, proxy rotation, browser settings — lives in per-site YAML files
-under [`configs/`](configs).  No per-site Python code; the schema is
-defined in [`shared/schemas/site_config.py`](shared/schemas/site_config.py)
-and validated on load.
-
-A minimal example:
-
-```yaml
-site_name: example_news
-engine: http                    # or 'playwright' for JS-rendered sites
-start_urls:
-  - https://example.com/news
-article_link_selector: "article h2 a"
-article:
-  title:        { selector: "h1.article-title" }
-  content:      { selector: "div.article-body" }
-  published_at: { selector: "time", attribute: datetime }
-pagination:
-  type: sitemap                 # sitemap | rss | next_button | url_pattern
-  sitemap_filter: "/news/"
-requests_per_minute: 30
-delay:
-  min_seconds: 0.5
-  max_seconds: 2.0
-```
-
-Validate a config without crawling:
+Requires **Node.js 18.18+** (Next.js 15) and npm.
 
 ```bash
-tlusr-crawl validate configs/tribunnews_sitemap.yaml
+npm install
+npm run dev          # http://localhost:3000 (Turbopack)
 ```
 
----
-
-## Tests
+By default the app looks for the scraper's output one directory up
+(`../data` and `../configs`). Point it elsewhere with environment variables
+(see [Data source](#data-source)):
 
 ```bash
-poetry run pytest tests/ -v
+DATA_DIR=/abs/path/to/data CONFIGS_DIR=/abs/path/to/configs npm run dev
 ```
 
-45 cases cover broker invariants, port compliance, rate-limiter
-behaviour, sitemap traversal, engine factory, anti-bot composition,
-correlation context, scraper-runner integration, and schema migrations.
+If those directories don't exist yet, the app still runs — every view
+degrades gracefully to empty state (zero counts, no articles).
+
+### Scripts
+
+| Command             | Action                                      |
+| ------------------- | ------------------------------------------- |
+| `npm run dev`       | Dev server with Turbopack                   |
+| `npm run build`     | Production build                            |
+| `npm run start`     | Serve the production build                  |
+| `npm run lint`      | ESLint (`eslint-config-next`)               |
+| `npm run typecheck` | `tsc --noEmit`                              |
 
 ---
 
-## Roadmap
+## Tech stack
 
-| Phase | Status     | Scope                                                       |
-| ----- | ---------- | ----------------------------------------------------------- |
-| 1     | ✅ Done    | Foundation: FSBroker, SQLite, shared models/schemas         |
-| 2     | ✅ Done    | Crawler: sitemap / pagination / RSS strategies              |
-| 3     | ✅ Done    | Scraper: HTTP + Playwright engines, anti-bot plugins        |
-| 4     | ✅ Done    | Parser worker (depends on `tlusr_parser` package)           |
-| 5     | 🚧 Stubs   | Broad crawl: `SearchCrawlStrategy`, `CrawlBudget`, coord.   |
+- **Framework** — Next.js 15 (App Router, React Server Components), React 18, TypeScript
+- **Styling** — Tailwind CSS 3 + `tailwindcss-animate`, dark theme by default
+- **UI primitives** — Radix UI (dialog, tabs, tooltip, scroll-area, separator, slot) wrapped in local `components/ui/*`
+- **Pipeline graph** — [`@xyflow/react`](https://reactflow.dev) (React Flow)
+- **Config viewer** — `@monaco-editor/react`
+- **Motion / icons** — `framer-motion`, `lucide-react`
+- **Parsing / validation** — `js-yaml`, `zod`
 
-Phase-by-phase design docs are under [`docs/`](docs).
+---
+
+## Routes
+
+| Route             | Type            | Description                                                                 |
+| ----------------- | --------------- | --------------------------------------------------------------------------- |
+| `/`               | Dashboard       | Queue stats, system metrics, recent articles. Revalidates every 10s.        |
+| `/pipeline`       | Pipeline view   | Interactive React Flow graph of the pipeline; click a node for details. 10s.|
+| `/articles`       | Article browser | Searchable, paginated list (client-fetched via `/api/articles`).            |
+| `/articles/[id]`  | Article detail  | Full parsed `Article` + parse diagnostics for one document.                 |
+| `/configs`        | Config viewer   | Per-site YAML configs rendered in Monaco. Revalidates every 60s.            |
+| `/docs`           | Docs            | Static reference describing the backend pipeline and its CLIs.              |
+
+Server-rendered pages (`/`, `/pipeline`, `/configs`) read the filesystem
+directly through `lib/server-data.ts`. The Articles browser is a client
+workspace that calls the API routes below.
+
+## API routes
+
+All are `GET`, read-only, and return JSON.
+
+| Endpoint              | Query params                          | Returns                                                              |
+| --------------------- | ------------------------------------- | -------------------------------------------------------------------- |
+| `/api/status`         | —                                     | Queue counts (`pending/processing/done/dead`), total articles, sites |
+| `/api/articles`       | `page`, `limit` (≤50), `q`, `site`    | Paginated `ArticleListItem[]` + `total`                              |
+| `/api/articles/[id]`  | —                                     | Full article file (`article` + `diagnostics`), or `404`             |
+| `/api/configs`        | —                                     | Parsed per-site config summaries + `raw_yaml`                        |
+
+---
+
+## Data source
+
+The app reads two directories produced by the scraper backend. Paths default
+to the parent directory and are overridable via env vars (wired in
+`next.config.mjs`):
+
+| Env var       | Default              | Holds                                  |
+| ------------- | -------------------- | -------------------------------------- |
+| `DATA_DIR`    | `../data`            | Filesystem queues + parsed article JSON|
+| `CONFIGS_DIR` | `../configs`         | Per-site YAML scraper configs          |
+
+Expected on-disk layout:
+
+```
+data/
+├── queues/
+│   ├── crawler_to_scraper/{pending,processing,done,dead}/*.json
+│   └── scraper_to_parser/{pending,processing,done,dead}/*.json
+└── parsed/
+    └── YYYY-MM-DD/
+        └── {site}/
+            └── {id}.json        # { article: {...}, diagnostics: {...} }
+
+configs/
+└── {site}.yaml                   # site_name, engine, start_urls, strategy, …
+```
+
+Queue health is computed by counting `*.json` files in each state directory;
+articles are discovered by walking `parsed/<date>/<site>/`. The shapes the app
+expects are defined in [`lib/types.ts`](lib/types.ts).
+
+---
+
+## Project structure
+
+```
+.
+├── app/
+│   ├── api/                  # Route handlers (status, articles, articles/[id], configs)
+│   ├── articles/             # List page + [id] detail + client workspace
+│   ├── configs/              # Config viewer page + client workspace
+│   ├── docs/                 # Static docs page
+│   ├── pipeline/             # React Flow pipeline page
+│   ├── layout.tsx            # Root layout, fonts, header/footer, dark theme
+│   ├── page.tsx              # Dashboard (home)
+│   └── globals.css
+├── components/
+│   ├── dashboard/            # queue-stats, system-metrics, recent-articles
+│   ├── pipeline/             # visualizer, node, stage-details-panel
+│   ├── articles/             # article-card, article-detail
+│   ├── configs/              # config-viewer (Monaco)
+│   ├── layout/               # site-header
+│   └── ui/                   # Radix-based primitives (button, card, tabs, …)
+└── lib/
+    ├── server-data.ts        # Filesystem readers used by server components
+    ├── pipeline-nodes.ts     # Static pipeline node metadata for the graph
+    ├── types.ts              # Shared TypeScript interfaces
+    └── utils.ts              # cn() and helpers
+```
+
+The `@/*` import alias maps to the project root (see `tsconfig.json`).
+
+---
+
+## Notes
+
+- The backend Python workers, their CLIs (`tlusr-crawl` / `tlusr-scrape` /
+  `tlusr-parse`), configs, and architecture live in a **separate repository**.
+  The `/docs` page summarises them for convenience.
+- A `pyproject.toml` / `poetry.lock` may be present in this directory left over
+  from scaffolding; they are not used by this web app.
+```
