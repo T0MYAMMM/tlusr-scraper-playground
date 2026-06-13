@@ -1,0 +1,84 @@
+[build-system]
+requires = ["poetry-core>=1.8"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "tlusr-scraping-system"
+version = "0.2.0"
+description = "Modular news acquisition platform: Crawler → Scraper → Parser pipeline"
+authors = ["t0myam"]
+readme = "README.md"
+packages = [
+    { include = "shared" },
+    { include = "tlusr_crawler" },
+    { include = "tlusr_scraper" },
+    { include = "tlusr_parser" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+pydantic = ">=2.5"
+pydantic-settings = ">=2.0"
+httpx = ">=0.27"
+playwright = { version = ">=1.40", optional = true }
+beautifulsoup4 = ">=4.12"
+lxml = ">=5.0"
+pyyaml = ">=6.0"
+click = ">=8.1"
+tenacity = ">=8.2"
+structlog = ">=24.1"
+orjson = ">=3.9"
+# parser core
+selectolax = ">=0.3.21"
+trafilatura = ">=1.12"
+markdownify = ">=0.11"
+dateparser = ">=1.2"
+# parser LLM escalation (optional)
+anthropic = { version = ">=0.30", optional = true }
+openai = { version = ">=1.30", optional = true }
+google-generativeai = { version = ">=0.7", optional = true }
+lingua-language-detector = { version = ">=2.0", optional = true }
+# Optional sinks
+google-cloud-pubsub = { version = ">=2.18", optional = true }
+google-cloud-storage = { version = ">=2.14", optional = true }
+google-api-python-client = { version = ">=2.0", optional = true }
+google-auth-httplib2 = { version = ">=0.2", optional = true }
+google-auth-oauthlib = { version = ">=1.0", optional = true }
+
+[tool.poetry.extras]
+playwright = ["playwright"]
+gcp = ["google-cloud-pubsub", "google-cloud-storage", "google-api-python-client", "google-auth-httplib2", "google-auth-oauthlib"]
+anthropic = ["anthropic"]
+openai = ["openai"]
+gemini = ["google-generativeai"]
+langdetect = ["lingua-language-detector"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+pytest-asyncio = ">=0.23"
+ruff = ">=0.4"
+mypy = ">=1.10"
+
+[tool.poetry.scripts]
+tlusr-crawl = "tlusr_crawler.runner:main"
+tlusr-scrape = "tlusr_scraper.runner:main"
+tlusr-parse = "tlusr_parser_worker.runner:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "PT", "RET", "ARG"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
