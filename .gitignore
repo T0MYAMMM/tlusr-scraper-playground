@@ -242,3 +242,7 @@ next-env.d.ts
 .vscode/
 .DS_Store
 Thumbs.db
+# Local env — never commit
+.env.local
+.env.*
+!.env.example
