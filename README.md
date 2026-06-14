@@ -163,3 +163,6 @@ The `@/*` import alias maps to the project root (see `tsconfig.json`).
 - A `pyproject.toml` / `poetry.lock` may be present in this directory left over
   from scaffolding; they are not used by this web app.
 ```
+
+---
+Part of the **[Tlusr platform](https://github.com/T0MYAMMM/tlusr-platform)**. Standards: [STANDARDS.md](https://github.com/T0MYAMMM/tlusr-platform/blob/main/STANDARDS.md) · Architecture: [ARCHITECTURE.md](https://github.com/T0MYAMMM/tlusr-platform/blob/main/ARCHITECTURE.md) · Contributing: [CONTRIBUTING.md](./CONTRIBUTING.md) · Agents: [AGENTS.md](./AGENTS.md)
